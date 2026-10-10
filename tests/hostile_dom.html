@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Hostile DOM - 自动识别必然失败的页面</title>
+<style>
+  body { margin:0; font-family:"Microsoft YaHei",sans-serif; }
+  /* 故意用无意义类名 + 深层嵌套，让启发式识别失效 */
+  .x1 { display:flex; height:100vh; }
+  .x2 { flex:1; display:flex; flex-direction:column; }
+  .x3 { flex:1; overflow-y:auto; padding:20px; }
+  .x4 { margin-bottom:14px; display:flex; }
+  .x5 { justify-content:flex-end; }
+  .x6 { max-width:70%; padding:12px 16px; border-radius:10px; background:#f2f4f8; white-space:pre-wrap; }
+  .x5 .x6 { background:#2f6fed; color:#fff; }
+  .x7 { display:flex; gap:10px; padding:14px 20px; border-top:1px solid #ddd; }
+  .x8 { flex:1; padding:10px; border:1px solid #ccc; border-radius:18px; outline:none; min-height:22px; }
+  .x9 { padding:10px 20px; border:none; background:#2f6fed; color:#fff; border-radius:18px; }
+</style>
+</head>
+<body>
+<div class="x1">
+  <div class="x2">
+    <div class="x3" id="scrollArea">
+      <div class="x4"><div class="x6">第一题：HTTP 默认端口是多少？A: 21  B: 80</div></div>
+      <div class="x4 x5"><div class="x6">B</div></div>
+      <div class="x4"><div class="x6">第二题：TCP 是面向连接的协议吗？A: 正确  B: 错误</div></div>
+    </div>
+    <div class="x7">
+      <div class="x8" contenteditable="true" data-ph="说点什么"></div>
+      <button class="x9" id="go">发送</button>
+    </div>
+  </div>
+</div>
+<script>
+  window.SENT = [];
+  document.getElementById('go').addEventListener('click', function () {
+    var ed = document.querySelector('.x8');
+    window.SENT.push(ed.textContent);
+    ed.textContent = '';
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,59 @@
+{
+  "_说明": "复制本文件为 config.json 后修改。命令行参数 --config 可指定其它路径。",
+
+  "mode": "cdp",
+
+  "llm": {
+    "provider": "openai",
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "",
+    "api_key_env": "QUIZBOT_API_KEY",
+    "model": "gpt-4o-mini",
+    "temperature": 0.2,
+    "max_tokens": 2048,
+    "timeout": 120,
+    "retries": 2,
+    "vision": false,
+    "extra_headers": {},
+    "extra_body": {}
+  },
+
+  "cdp": {
+    "host": "127.0.0.1",
+    "port": 9222,
+    "title_contains": "",
+    "url_contains": "",
+    "index": 0
+  },
+
+  "capture": {
+    "title_contains": "",
+    "pid": null,
+    "class_contains": "",
+    "index": 0,
+    "client_only": false,
+    "region": null,
+    "crop": null,
+    "crop_ratio": null,
+    "max_width": 1600,
+    "debug_dir": "logs"
+  },
+
+  "vision": {
+    "click_delay": 0.35
+  },
+
+  "instructions": "",
+
+  "low_confidence_action": "fill",
+  "auto_submit": {
+    "enabled": false,
+    "selector": "",
+    "text": "提交",
+    "confirm_text": "确认"
+  },
+
+  "report": {
+    "path": "logs/last-run.json"
+  }
+}

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>示例答题页面 - quiz-bot 自测</title>
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; color:#222; }
+  h1 { font-size: 20px; }
+  .question { border: 1px solid #ddd; border-radius: 8px; padding: 14px 18px; margin: 14px 0; }
+  .stem { font-weight: 600; margin-bottom: 8px; }
+  label { display: block; padding: 5px 0; cursor: pointer; }
+  input[type=text], textarea, select { width: 100%; padding: 7px; border: 1px solid #bbb; border-radius: 5px;
+    box-sizing: border-box; font-family: inherit; font-size: 14px; }
+  textarea { height: 84px; }
+  #submit { margin: 18px 0 40px; padding: 10px 26px; font-size: 15px; cursor: pointer; }
+  #result { color: #0a0; font-weight: 600; min-height: 22px; }
+</style>
+</head>
+<body>
+<h1>在线测评（示例卷）</h1>
+<div id="result"></div>
+
+<div class="question" data-q="1">
+  <div class="stem">1. 下列哪个是 HTTP 的默认端口号？</div>
+  <label><input type="radio" name="q1" value="A"> A. 21</label>
+  <label><input type="radio" name="q1" value="B"> B. 80</label>
+  <label><input type="radio" name="q1" value="C"> C. 443</label>
+  <label><input type="radio" name="q1" value="D"> D. 3306</label>
+</div>
+
+<div class="question" data-q="2">
+  <div class="stem">2. 以下哪些属于关系型数据库？（多选）</div>
+  <label><input type="checkbox" name="q2" value="A"> A. MySQL</label>
+  <label><input type="checkbox" name="q2" value="B"> B. Redis</label>
+  <label><input type="checkbox" name="q2" value="C"> C. PostgreSQL</label>
+  <label><input type="checkbox" name="q2" value="D"> D. MongoDB</label>
+</div>
+
+<div class="question" data-q="3">
+  <div class="stem">3. TCP 是面向连接的协议。</div>
+  <label><input type="radio" name="q3" value="T"> 对</label>
+  <label><input type="radio" name="q3" value="F"> 错</label>
+</div>
+
+<div class="question" data-q="4">
+  <div class="stem">4. 请简要说明什么是幂等性。</div>
+  <textarea name="q4" placeholder="请输入你的回答"></textarea>
+</div>
+
+<div class="question" data-q="5">
+  <div class="stem">5. 请选择你常用的编程语言。</div>
+  <select name="q5">
+    <option value="">--请选择--</option>
+    <option value="py">Python</option>
+    <option value="js">JavaScript</option>
+    <option value="java">Java</option>
+  </select>
+</div>
+
+<div class="question" data-q="6">
+  <div class="stem">6. 填空题：HTTP 状态码 200 表示 ____。</div>
+  <input type="text" name="q6" placeholder="填写答案">
+</div>
+
+<button id="submit" type="button" onclick="submitPaper()">提交试卷</button>
+
+<script>
+function submitPaper() {
+  const picked = [];
+  ['q1','q2','q3'].forEach(n => {
+    document.querySelectorAll('input[name="' + n + '"]:checked').forEach(el => picked.push(n + '=' + el.value));
+  });
+  picked.push('q4=' + (document.querySelector('textarea[name=q4]').value || '(空)').slice(0, 30));
+  picked.push('q5=' + document.querySelector('select[name=q5]').value);
+  picked.push('q6=' + (document.querySelector('input[name=q6]').value || '(空)'));
+  document.getElementById('result').textContent = '已提交：' + picked.join(' | ');
+  return false;
+}
+</script>
+</body>
+</html>
