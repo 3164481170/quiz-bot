@@ -1,10 +1,9 @@
 /**
- * 打发布包：生成 quiz-bot-v1.7.0.zip
+ * 打发布包：生成 quiz-bot-v<版本>.zip
  *
- * 特点：
- *   - 包内顶层是一个 quiz-bot/ 目录，解压后不会散落一地
- *   - 自动排除 node_modules / logs / __pycache__ / 嵌套的旧 zip
- *   - 逐文件 CRC32 校验，生成后自检
+ *   - 包内顶层是 quiz-bot/ 目录，解压后不会散落
+ *   - 自动排除 node_modules / logs / __pycache__ / 旧 zip / config.json
+ *   - 生成后逐文件 CRC32 自检
  *
  *   node tools/make-zip.mjs
  */
@@ -15,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
-const VERSION = '1.7.0';
+const VERSION = '1.9.1';
 const PKG_NAME = 'quiz-bot';
 const OUT = path.join(ROOT, PKG_NAME + '-v' + VERSION + '.zip');
 
@@ -35,8 +34,6 @@ function walk(dir, base, out) {
     } else {
       if (EXCLUDE_FILES.has(name)) continue;
       if (EXCLUDE_EXT.some(e => name.toLowerCase().endsWith(e))) continue;
-      // 只排除 macOS 的 AppleDouble 元数据文件（._xxx）。
-      // 注意：不能按 "_" 开头一刀切 —— 那会把 Python 必需的 __init__.py 也排除掉。
       if (name.startsWith('._')) continue;
       out.push({ rel, full, size: st.size });
     }
@@ -44,7 +41,6 @@ function walk(dir, base, out) {
   return out;
 }
 
-/* ---------- CRC32 ---------- */
 const CRC_TABLE = (() => {
   const t = new Int32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -66,22 +62,21 @@ function dosDateTime(d) {
   };
 }
 
-/* ---------- 打包 ---------- */
 const files = walk(ROOT, PKG_NAME, []);
 files.sort((a, b) => a.rel.localeCompare(b.rel));
 
 console.log('='.repeat(64));
-console.log('  打包 ' + PKG_NAME + ' v' + VERSION);
+console.log('  Packaging ' + PKG_NAME + ' v' + VERSION);
 console.log('='.repeat(64));
 console.log('');
-console.log('包含 ' + files.length + ' 个文件：');
+console.log(files.length + ' files:');
 let totalRaw = 0;
 for (const f of files) {
   totalRaw += f.size;
   console.log('  ' + f.rel.padEnd(52) + (f.size / 1024).toFixed(1).padStart(8) + ' KB');
 }
 console.log('');
-console.log('原始大小: ' + (totalRaw / 1024).toFixed(1) + ' KB');
+console.log('raw: ' + (totalRaw / 1024).toFixed(1) + ' KB');
 
 const chunks = [];
 const central = [];
@@ -140,20 +135,17 @@ end.writeUInt32LE(offset, 16);
 if (fs.existsSync(OUT)) fs.unlinkSync(OUT);
 fs.writeFileSync(OUT, Buffer.concat([...chunks, centralBuf, end]));
 const zipSize = fs.statSync(OUT).size;
+console.log('zip: ' + (zipSize / 1024).toFixed(1) + ' KB');
+console.log('written: ' + OUT);
 
-console.log('压缩后: ' + (zipSize / 1024).toFixed(1) + ' KB');
 console.log('');
-console.log('已生成: ' + OUT);
-
-/* ---------- 自检：重新读回并解压校验 ---------- */
-console.log('');
-console.log('自检中…');
+console.log('verifying...');
 const buf = fs.readFileSync(OUT);
 let eocd = -1;
 for (let i = buf.length - 22; i >= Math.max(0, buf.length - 70000); i--) {
   if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
 }
-if (eocd < 0) { console.log('  ✗ ZIP 结构无效'); process.exit(1); }
+if (eocd < 0) { console.log('  FAIL: invalid zip'); process.exit(1); }
 const count = buf.readUInt16LE(eocd + 10);
 let p = buf.readUInt32LE(eocd + 16);
 let ok = 0, bad = 0;
@@ -172,18 +164,16 @@ for (let n = 0; n < count; n++) {
   const raw = buf.slice(lo + 30 + lnlen + lelen, lo + 30 + lnlen + lelen + csize);
   let out;
   try { out = method === 8 ? zlib.inflateRawSync(raw) : raw; }
-  catch (e) { console.log('  ✗ 解压失败 ' + name); bad++; p += 46 + nlen + elen + clen; continue; }
-  if (out.length !== usize || crc32(out) !== crc) { console.log('  ✗ 校验失败 ' + name); bad++; }
+  catch (e) { console.log('  FAIL unzip ' + name); bad++; p += 46 + nlen + elen + clen; continue; }
+  if (out.length !== usize || crc32(out) !== crc) { console.log('  FAIL crc ' + name); bad++; }
   else ok++;
   p += 46 + nlen + elen + clen;
 }
-console.log('  文件校验: ' + ok + ' / ' + count + ' 通过，' + bad + ' 个异常');
+console.log('  checked: ' + ok + ' / ' + count + ', bad: ' + bad);
 
-// 抽查：油猴脚本内容是否与本地一致
 const idx = files.findIndex(f => f.rel.endsWith('userscript/quizbot.user.js'));
 if (idx >= 0) {
-  const local = fs.readFileSync(files[idx].full);
-  const localCrc = crc32(local);
+  const localCrc = crc32(fs.readFileSync(files[idx].full));
   const found = (() => {
     let q = buf.readUInt32LE(eocd + 16);
     for (let n = 0; n < count; n++) {
@@ -196,9 +186,9 @@ if (idx >= 0) {
     }
     return -1;
   })();
-  console.log('  油猴脚本 CRC 一致: ' + (found === localCrc ? '是 ✔' : '否 ✗'));
+  console.log('  userscript CRC match: ' + (found === localCrc ? 'YES' : 'NO'));
 }
 
 console.log('');
-if (bad) { console.log('打包失败：有 ' + bad + ' 个文件校验不通过'); process.exit(1); }
-console.log('打包完成 ✔');
+if (bad) { console.log('FAILED: ' + bad + ' bad entries'); process.exit(1); }
+console.log('DONE');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI 网页答题助手
 // @namespace    https://local/quizbot
-// @version      1.7.0
+// @version      1.9.1
 // @description  读取网页上的题目 -> 调用你自己配置的 AI API 生成答案 -> 自动填入输入框
 // @author       quiz-bot
 // @match        *://*/*
@@ -34,7 +34,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '1.7.0';
+  var VERSION = '1.9.1';
   var TICK = String.fromCharCode(96);
   var FENCE = TICK + TICK + TICK;
 
@@ -61,7 +61,7 @@
     chatAutoReply: false,
     chatSelfSide: 'auto',
     chatCooldownMs: 1500,
-    chatMaxPerMinute: 12
+    watchdogIntervalMs: 5000
   };
 
   /* ------------------------------------------------------------ 配置存储 */
@@ -894,7 +894,7 @@
         CHAT.watching = false;
         if (REGION.observer) { REGION.observer.disconnect(); REGION.observer = null; }
         REGION.watching = false;
-        handledHashes = Object.create(null);      // 清空「已作答」记录
+        clearAnswerLog();                          // 清空「已作答」记录与列表
         log('已重置：清除了保存的消息区域/输入框/框选范围，请重新点「① 预览对话」');
         setStatus('已重置，请重新识别', '#0a0');
       }
@@ -902,16 +902,73 @@
     btnReset.textContent = '🔄 重置识别';
 
 
+    // ---- 答题记录区 ----
+    ANSWER_LOG_BOX = el('pre', {
+      style: 'background:#1b2430;color:#8fd4ff;font-size:11px;line-height:1.5;padding:8px;' +
+             'border-radius:6px;max-height:170px;overflow:auto;margin:6px 0 0;' +
+             'white-space:pre-wrap;word-break:break-all;'
+    }, []);
+    var btnLogToggle = el('button', {
+      style: BTN + 'background:#e3f2fd;border-color:#42a5f5;',
+      onclick: function () {
+        var box = PANEL.querySelector('#qb-answerlog');
+        box.style.display = box.style.display === 'none' ? 'block' : 'none';
+        if (box.style.display !== 'none') refreshAnswerLogView();
+      }
+    }, []);
+    btnLogToggle.textContent = '📋 答题记录';
+    var btnLogExport = el('button', {
+      style: BTN,
+      onclick: function () {
+        try {
+          var lines = ['# 答题记录', '', '导出时间：' + new Date().toLocaleString(), ''];
+          for (var i = ANSWER_LOG.length - 1; i >= 0; i--) {
+            var r0 = ANSWER_LOG[i];
+            var st = r0.status === 'answered' ? '已作答' :
+                     (r0.status === 'skipped' ? '跳过' : '失败');
+            lines.push('## [' + st + '] ' + new Date(r0.time).toLocaleString());
+            lines.push('');
+            lines.push('题目：');
+            lines.push(String(r0.text || '').trim());
+            lines.push('');
+            if (r0.answer) lines.push('答案：' + r0.answer);
+            if (r0.reason) lines.push('说明：' + r0.reason);
+            lines.push('');
+            lines.push('---');
+            lines.push('');
+          }
+          var blob = new Blob([lines.join(String.fromCharCode(10))],
+                              { type: 'text/markdown;charset=utf-8' });
+          var a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'quizbot-answerlog.md';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+        } catch (e) { log('导出失败: ' + e.message, 'error'); }
+      }
+    }, []);
+    btnLogExport.textContent = '📤 导出记录';
+
+    var answerLogWrap = el('div', {
+      id: 'qb-answerlog',
+      style: 'display:none;border-top:1px solid #eee;margin-top:8px;padding-top:8px;'
+    }, [ANSWER_LOG_BOX]);
+
     LOG_BOX = el('pre', {
       style: 'background:#111;color:#9f9;font-size:11px;line-height:1.45;padding:8px;border-radius:6px;' +
-             'max-height:220px;overflow:auto;margin:8px 0 0;white-space:pre-wrap;word-break:break-all;'
+             'max-height:200px;overflow:auto;margin:8px 0 0;white-space:pre-wrap;word-break:break-all;'
     }, []);
 
     var configBox = el('div', { id: 'qb-config', style: 'display:none;border-top:1px solid #eee;margin-top:8px;padding-top:8px;' }, []);
 
     PANEL = el('div', {
       'data-quizbot-ui': '1',
-      style: 'position:fixed;right:16px;bottom:16px;width:340px;z-index:2147483647;background:#fff;' +
+      // 高度/宽度都限制在视口内并允许内部滚动 —— 小屏或系统缩放时内容不再被截断
+      style: 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#fff;' +
+             'width:340px;max-width:calc(100vw - 32px);' +
+             'max-height:calc(100vh - 32px);overflow-y:auto;overflow-x:hidden;' +
+             'box-sizing:border-box;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;' +
              'border:1px solid #d0d0d0;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);' +
              'padding:12px;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;color:#222;'
     }, [
@@ -927,6 +984,8 @@
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;' }, [btnLearn, btnRegionPick]),
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;' }, [btnRegionAnswer, btnRegionAuto]),
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;' }, [btnSnapshot, btnReset]),
+      el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;' }, [btnLogToggle, btnLogExport]),
+      answerLogWrap,
       el('div', { style: 'color:#888;font-size:11px;margin:8px 0 4px;', text: '【表单模式】答题界面是问卷/试卷时用这组' }),
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;' }, [btnRead, btnRun, btnFill, btnCfg, btnClear]),
       status,
@@ -1031,20 +1090,17 @@
       selSide.appendChild(opt);
     });
     var inCool = textInput('chatCooldownMs', 'number');
-    var inRate = textInput('chatMaxPerMinute', 'number');
     var chkChatAuto = el('input', { type: 'checkbox' }, []);
     chkChatAuto.checked = !!CONFIG.chatAutoReply;
 
     box.appendChild(field('我的消息位置', selSide, '自动判断失误时手动指定，用于区分「谁发的」'));
     box.appendChild(field('回复延迟（毫秒）', inCool, '检测到新消息后等多久再回复'));
-    box.appendChild(field('每分钟最多回复', inRate, '防止刷屏的安全阀'));
     box.appendChild(field('打开页面自动开启应答', chkChatAuto));
 
     btnSaveExtra = function () {
       saveConfig({
         chatSelfSide: selSide.value,
-        chatCooldownMs: parseInt(inCool.value, 10) || 1500,
-        chatMaxPerMinute: parseInt(inRate.value, 10) || 12
+        chatCooldownMs: parseInt(inCool.value, 10) || 1500
       });
       if (chkChatAuto.checked && !CHAT.watching) setTimeout(chatStartWatch, 300);
       if (!chkChatAuto.checked && CHAT.watching) chatStopWatch();
@@ -1302,7 +1358,14 @@
     lastHash: '',
     busy: false,
     timer: null,
-    handledAt: []
+    baseline: Object.create(null),   // 开启自动应答前的历史题目（不重复作答）
+    busySince: 0,                    // busy 置位时间，用于超时自恢复
+    pendingAgain: false,             // 处理期间又来了新题，忙完立刻补一次
+    failures: 0,
+    watchdog: null,                  // 定时兜底，防止请求挂住后永久卡死
+    lastHandledAt: 0,                // 上次处理完成的时刻（仅用于抑制抖动）
+    timeouts: 0,                     // 连续超时次数（用于退避）
+    retryAfter: 0                    // 退避截止时间
   };
 
   function cssPathOf(el) {
@@ -1858,10 +1921,25 @@
     if (byContent.text) {
       log('→ 实际将作答（' + byContent.reason + '）：「' +
           byContent.text.replace(/\n/g, ' ').slice(0, 90) + '」');
+      if (byContent.previouslyAnswered && byContent.previousRecord) {
+        var pr = byContent.previousRecord;
+        log('   ⚠ 这道题以前出现过（本次是第 ' + ((pr.count || 1) + 1) + ' 次），上次答案：' +
+            (pr.answer || '(无)') + '，时间：' + new Date(pr.time).toLocaleString());
+      } else {
+        log('   ✓ 这是一道新题');
+      }
       setStatus('待答题目已就绪', '#0a0');
     } else {
       log('→ ' + byContent.reason, 'error');
       setStatus('没有待答题目', '#888');
+    }
+
+    if (ANSWER_LOG.length) {
+      var done = ANSWER_LOG.filter(function (r) { return r.status === 'answered'; }).length;
+      var skipped = ANSWER_LOG.filter(function (r) { return r.status === 'skipped'; }).length;
+      var failed = ANSWER_LOG.filter(function (r) { return r.status === 'failed'; }).length;
+      log('→ 已答 ' + done + ' 题，跳过 ' + skipped + ' 题，失败 ' + failed +
+          ' 次（点「📋 答题记录」查看详情）');
     }
     return messages;
   }
@@ -2061,22 +2139,147 @@
      于是常常"只识别到 1 条"，而且还是已经答过的旧题。
      这里改为纯内容驱动：扫描所有文本块，挑出「像题目且不是批改反馈」的最后一条。 */
 
-  var handledHashes = Object.create(null);   // 已作答过的题面，避免重复回答
+  /* ---------- 答题记录 ----------
+     不只记 hash，还记下题面、答案、时间、状态，方便在面板里查看与导出。
+     状态：answered=已作答 / skipped=模型判断无需作答 / failed=出错未发送
 
-  function markHandled(text) {
+     记录会**持久化**到 Tampermonkey 存储（无 GM 时退化为 localStorage），
+     关闭浏览器、刷新页面后依然保留。 */
+
+  var handledHashes = Object.create(null);   // hash -> 记录对象
+  var ANSWER_LOG = [];                        // 按时间顺序的完整记录
+  var ANSWER_LOG_STORE_KEY = 'answerLog';
+  var ANSWER_LOG_MAX = 500;                   // 持久化上限，避免存储无限膨胀
+
+  function loadAnswerLog() {
+    try {
+      var raw = Store.get(ANSWER_LOG_STORE_KEY);
+      if (!raw || typeof raw !== 'object' || !raw.length) return;
+      ANSWER_LOG = raw.filter(function (r) {
+        return r && typeof r === 'object' && r.hash && r.time;
+      });
+      handledHashes = Object.create(null);
+      for (var i = 0; i < ANSWER_LOG.length; i++) {
+        var rec = ANSWER_LOG[i];
+        // 只有「已作答/跳过」的才进 handledHashes；失败记录不阻止重试
+        if (rec.status !== 'failed') handledHashes[rec.hash] = rec;
+      }
+    } catch (e) { /* 存储损坏时忽略，避免影响主流程 */ }
+  }
+
+  function saveAnswerLog() {
+    try {
+      var slim = ANSWER_LOG.slice(-ANSWER_LOG_MAX).map(function (r) {
+        return {
+          hash: r.hash,
+          time: r.time,
+          // 题面太长会撑爆存储，截断保存；完整内容仍可在导出时看到近期记录
+          text: String(r.text || '').slice(0, 240),
+          answer: String(r.answer || '').slice(0, 200),
+          status: r.status,
+          confidence: r.confidence,
+          reason: String(r.reason || '').slice(0, 160),
+          count: r.count || 1
+        };
+      });
+      Store.set(ANSWER_LOG_STORE_KEY, slim);
+    } catch (e) { /* 存储不可用时静默失败，不影响答题 */ }
+  }
+
+  function markHandled(text, extra) {
     var h = hashText(text);
-    handledHashes[h] = Date.now();
-    // 只保留最近 200 条，避免长期运行内存膨胀
-    var keys = Object.keys(handledHashes);
-    if (keys.length > 200) {
-      keys.sort(function (a, b) { return handledHashes[a] - handledHashes[b]; });
-      for (var i = 0; i < keys.length - 100; i++) delete handledHashes[keys[i]];
+    var info = extra || {};
+    var prev = handledHashes[h];
+    var record = {
+      hash: h,
+      time: Date.now(),
+      text: String(text || ''),
+      answer: info.answer === undefined ? '' : String(info.answer),
+      status: info.status || 'answered',
+      confidence: info.confidence === undefined ? null : info.confidence,
+      reason: info.reason || '',
+      // 记录这道题历史上出现过几次（含本次）
+      count: prev && prev.count ? prev.count + 1 : 2,
+      firstSeen: prev && prev.firstSeen ? prev.firstSeen : Date.now()
+    };
+    handledHashes[h] = record;
+
+    // 同一题重复登记则覆盖（保留出现次数），不重复追加
+    var existing = -1;
+    for (var i = 0; i < ANSWER_LOG.length; i++) {
+      if (ANSWER_LOG[i].hash === h) { existing = i; break; }
     }
+    if (existing >= 0) ANSWER_LOG[existing] = record;
+    else ANSWER_LOG.push(record);
+
+    if (ANSWER_LOG.length > ANSWER_LOG_MAX + 100) {
+      ANSWER_LOG = ANSWER_LOG.slice(-ANSWER_LOG_MAX);
+    }
+    saveAnswerLog();
+    refreshAnswerLogView();
     return h;
   }
 
   function isHandled(text) {
     return !!handledHashes[hashText(text)];
+  }
+
+  // 失败记录：只用于展示，不阻止后续重试
+  function addFailureRecord(text, reason) {
+    var h = 'fail:' + hashText(String(text || '')) + ':' + Date.now();
+    ANSWER_LOG.push({
+      hash: h,
+      time: Date.now(),
+      text: String(text || ''),
+      answer: '',
+      status: 'failed',
+      confidence: null,
+      reason: String(reason || '').slice(0, 120)
+    });
+    if (ANSWER_LOG.length > ANSWER_LOG_MAX + 100) {
+      ANSWER_LOG = ANSWER_LOG.slice(-ANSWER_LOG_MAX);
+    }
+    saveAnswerLog();
+    refreshAnswerLogView();
+  }
+
+  function clearAnswerLog() {
+    handledHashes = Object.create(null);
+    ANSWER_LOG = [];
+    saveAnswerLog();
+    refreshAnswerLogView();
+  }
+
+  // 把题面压成一行便于列表显示
+  function shortTitle(text, limit) {
+    var t = clean(text).replace(/\s+/g, ' ');
+    // 去掉常见的知识点前缀，让题面更醒目
+    t = t.replace(/^考查知识点[:：][^【]*/, '').trim();
+    var max = limit || 46;
+    return t.length > max ? t.slice(0, max) + '…' : t;
+  }
+
+  var ANSWER_LOG_BOX = null;
+
+  function refreshAnswerLogView() {
+    if (!ANSWER_LOG_BOX) return;
+    if (!ANSWER_LOG.length) {
+      ANSWER_LOG_BOX.textContent = '（还没有作答记录）';
+      return;
+    }
+    var lines = [];
+    for (var i = ANSWER_LOG.length - 1; i >= 0; i--) {
+      var r = ANSWER_LOG[i];
+      var stamp = new Date(r.time).toTimeString().slice(0, 8);
+      var mark = r.status === 'answered' ? '✔' : (r.status === 'skipped' ? '○' : '✗');
+      var tail = r.status === 'answered'
+        ? ('→ ' + (r.answer || '').slice(0, 24))
+        : (r.status === 'skipped' ? '→ 无需作答' : '→ 出错未发送');
+      var times = (r.count && r.count > 1) ? ('  ⟲ 第 ' + r.count + ' 次出现') : '';
+      lines.push(mark + ' [' + stamp + '] ' + shortTitle(r.text) + times + '\n      ' + tail);
+    }
+    ANSWER_LOG_BOX.textContent = lines.join('\n') + '\n\n共 ' + ANSWER_LOG.length + ' 条记录';
+    ANSWER_LOG_BOX.scrollTop = 0;
   }
 
   // 收集「最内层的文本块」：带位置，按文档顺序
@@ -2110,7 +2313,8 @@
     return out;
   }
 
-  // 找最新的一道待答题目
+
+  // 找最新的一道待答题目（手动「回答最新一条」用）
   function findLatestPendingQuestion(force) {
     var blocks = collectTextBlocks();
 
@@ -2139,14 +2343,17 @@
     // 按位置从上到下排序，最后一条 = 最新的一道题
     inner.sort(function (p, q) { return (p.top - q.top) || (p.left - q.left); });
 
-    // 关键：只看「最新那一道」，不要回退到更早的题。
-    // 否则最新题答完后，会继续把历史旧题翻出来重答（去重形同失效）。
+    // 只看「最新那一道」，不回退到更早的题。
+    // 注意：这里**不**因为「答过」就拒绝 —— 记录归记录，是否作答由调用方决定。
     var latest = inner[inner.length - 1];
     if (!latest) return { text: '', reason: '没有找到题目' };
-    if (!force && isHandled(latest.text)) {
-      return { text: '', reason: '最新题目已作答，等待新题' };
-    }
-    return { text: latest.text, reason: '页面中最新的一道题' };
+    var prev = handledHashes[hashText(latest.text)];
+    return {
+      text: latest.text,
+      reason: prev ? '页面中最新的一道题（此前已答过）' : '页面中最新的一道题',
+      previouslyAnswered: !!prev,
+      previousRecord: prev || null
+    };
   }
 
   /* ---------- 判断一条消息是「题目」还是「批改反馈」 ----------
@@ -2222,8 +2429,22 @@
   }
 
   /* --- 回答最新一条「对方」消息 --- */
+  // 一次作答允许的最长时间。超过就强制释放 busy ——
+  // 否则一旦某次请求挂住（网络卡顿、接口不返回），busy 会永久为 true，
+  // 之后所有题目都被「正在处理上一条消息」挡掉，表现为自动应答莫名中断。
+  var ANSWER_TIMEOUT_MS = 90000;
+
   function chatAnswerLatest(force) {
-    if (CHAT.busy) { log('正在处理上一条消息…'); return Promise.resolve(null); }
+    if (CHAT.busy) {
+      var held = Date.now() - (CHAT.busySince || 0);
+      if (held < ANSWER_TIMEOUT_MS) {
+        log('正在处理上一条消息…（已 ' + Math.round(held / 1000) + 's）');
+        CHAT.pendingAgain = true;      // 记下来：空了之后立刻补一次
+        return Promise.resolve(null);
+      }
+      log('上一次作答卡住超过 ' + Math.round(ANSWER_TIMEOUT_MS / 1000) + 's，强制恢复', 'error');
+      CHAT.busy = false;
+    }
     if (!CONFIG.baseUrl || !CONFIG.model) {
       log('请先在「设置」里填写 Base URL 和模型名', 'error');
       return Promise.resolve(null);
@@ -2233,7 +2454,8 @@
       return Promise.resolve(null);
     }
 
-    // 优先用「内容驱动」找最新题目 —— 不依赖消息列表层级，更稳。
+    // 内容驱动：每次只处理**最新的一道题**（平台每次只出一道）。
+    // findLatestPendingQuestion 内部已排除「批改反馈」和「已作答过的题」。
     var byContent = findLatestPendingQuestion(force);
     var targetText = byContent.text;
     var how = byContent.reason;
@@ -2256,12 +2478,28 @@
 
     var target = { text: targetText };
     var hash = hashText(target.text);
+
+    // 只拦「同一条消息刚处理完又立刻被触发」这种抖动，
+    // 不拦「这道题以前答过」—— 那种情况照常作答，并在记录里体现。
     if (!force && hash === CHAT.lastHash) {
-      return Promise.resolve(null);       // 同一条已处理过
+      var since = Date.now() - (CHAT.lastHandledAt || 0);
+      if (since < 3000) {
+        return Promise.resolve(null);     // 3 秒内的同一题重复触发，忽略
+      }
     }
+    CHAT.pendingAgain = false;
 
     CHAT.busy = true;
+    CHAT.busySince = Date.now();
     setStatus('请求 AI 作答…', '#666');
+
+    // 明确告知这道题是否出现过，以及当时的答案
+    var prevRec = handledHashes[hash];
+    if (prevRec) {
+      log('⚠ 这道题以前出现过（本次是第 ' + ((prevRec.count || 1) + 1) + ' 次），上次答案：' +
+          (prevRec.answer || '(无)') +
+          '，时间：' + new Date(prevRec.time).toLocaleString());
+    }
     log('最新题面（' + target.text.length + ' 字）：「' + target.text.replace(/\n/g, ' ').slice(0, 80) + '」');
 
     var started = Date.now();
@@ -2270,12 +2508,15 @@
       if (data.skip) {
         log('模型判断这条无需作答，已跳过');
         CHAT.lastHash = hash;
+        CHAT.lastHandledAt = Date.now();
+        markHandled(target.text, { status: 'skipped', reason: data.reason || '' });
         setStatus('已跳过（无需作答）', '#888');
         return { skipped: true };
       }
       var answer = String(data.answer === undefined ? '' : data.answer).trim();
       if (!answer) {
         log('模型没有给出可发送的答案', 'error');
+        markHandled(target.text, { status: 'failed', reason: '模型未给出答案' });
         setStatus('模型未给出答案', '#e33');
         return null;
       }
@@ -2292,19 +2533,38 @@
         setTimeout(function () {
           var sentHow = sendChatInput(CHAT.inputEl);
           CHAT.lastHash = hash;
-          markHandled(target.text);      // 登记为已作答，避免自动应答重复回复
-          CHAT.handledAt.push(Date.now());
+          CHAT.lastHandledAt = Date.now();
+          markHandled(target.text, {     // 登记为已作答，并留下可查记录
+            status: 'answered',
+            answer: answer,
+            confidence: data.confidence,
+            reason: data.reason || ''
+          });
+          CHAT.timeouts = 0;         // 成功即重置超时计数
+          CHAT.retryAfter = 0;
           log('已发送（方式：' + (sentHow === 'button' ? '点击发送按钮' : '回车键') + '）');
           setStatus('已回复 1 条', '#0a0');
           resolve({ sent: true, answer: answer });
         }, 350);
       });
     }).catch(function (err) {
-      log('出错: ' + err.message, 'error');
-      setStatus('出错，详见日志', '#e33');
+      log('出错: ' + err.message + '（不登记为已答，稍后会自动重试）', 'error');
+      setStatus('出错，稍后重试', '#e33');
+      // 关键：出错时**不**进 handledHashes，让监听器下一轮能重新处理这道题。
+      // 但要留一条失败记录，方便回看哪些题没答上。
+      addFailureRecord(target.text, err.message);
+      CHAT.failures = (CHAT.failures || 0) + 1;
       return null;
     }).then(function (value) {
       CHAT.busy = false;
+      CHAT.busySince = 0;
+      // 处理期间又来了新题 → 立刻补一次，避免「只答了最后一道」
+      if (CHAT.pendingAgain) {
+        CHAT.pendingAgain = false;
+        setTimeout(function () {
+          if (CHAT.watching) chatAnswerLatest(false);
+        }, 260);
+      }
       return value;
     });
   }
@@ -2330,14 +2590,7 @@
       if (pending) clearTimeout(pending);
       pending = setTimeout(function () {
         if (!CHAT.watching) return;
-        // 频率限制，避免刷屏
-        var now = Date.now();
-        CHAT.handledAt = CHAT.handledAt.filter(function (t) { return now - t < 60000; });
-        if (CHAT.handledAt.length >= Number(CONFIG.chatMaxPerMinute || 12)) {
-          log('每分钟回复数已达上限，暂停自动应答', 'error');
-          chatStopWatch();
-          return;
-        }
+        // 若正忙，chatAnswerLatest 内部会记下 pendingAgain，忙完自动补一次
         chatAnswerLatest(false);
       }, Math.max(400, Number(CONFIG.chatCooldownMs) || 1500));
     }
@@ -2361,6 +2614,11 @@
     }
 
     CHAT.watching = true;
+    CHAT.failures = 0;
+    CHAT.pendingAgain = false;
+    CHAT.timeouts = 0;
+    CHAT.retryAfter = 0;
+    startWatchdog();
     saveConfig({ chatAutoReply: true });
     log('已开启自动应答：监听 ' + WATCHERS.length + ' 个文档，出现新题目即自动作答');
     setStatus('自动应答已开启', '#0a0');
@@ -2369,7 +2627,47 @@
     return true;
   }
 
+  // 看门狗：即使页面再无任何变化，也能发现「busy 卡死」并自恢复。
+  // 没有它的话，一次挂住的请求就会让自动应答永久停止响应。
+  function startWatchdog() {
+    stopWatchdog();
+    CHAT.watchdog = setInterval(function () {
+      if (!CHAT.watching) { stopWatchdog(); return; }
+      if (!CHAT.busy) {
+        // 空闲时也顺手检查一次：可能之前的变化被合并/错过了
+        if (CHAT.retryAfter && Date.now() < CHAT.retryAfter) return;   // 退避中
+        CHAT.retryAfter = 0;
+        chatAnswerLatest(false);
+        return;
+      }
+      var held = Date.now() - (CHAT.busySince || 0);
+      if (held > ANSWER_TIMEOUT_MS) {
+        CHAT.busy = false;
+        CHAT.busySince = 0;
+        CHAT.timeouts = (CHAT.timeouts || 0) + 1;
+        // 同一道题反复超时说明接口/网络有问题，重试要退避，别把浏览器打死
+        CHAT.retryAfter = Date.now() + Math.min(60000, 3000 * CHAT.timeouts);
+        if (CHAT.timeouts >= 5) {
+          log('看门狗：连续 ' + CHAT.timeouts + ' 次作答超时，暂停 60 秒后重试', 'error');
+          setStatus('接口多次超时，暂停重试', '#e33');
+        } else {
+          log('看门狗：作答卡住 ' + Math.round(held / 1000) + 's，已恢复（第 ' +
+              CHAT.timeouts + ' 次）', 'error');
+          setStatus('上次作答超时，已恢复', '#e80');
+        }
+      }
+    }, Number(CONFIG.watchdogIntervalMs) || 5000);
+  }
+
+  function stopWatchdog() {
+    if (CHAT.watchdog) {
+      clearInterval(CHAT.watchdog);
+      CHAT.watchdog = null;
+    }
+  }
+
   function chatStopWatch(quiet) {
+    stopWatchdog();
     for (var i = 0; i < WATCHERS.length; i++) {
       try { WATCHERS[i].disconnect(); } catch (e) { /* 忽略 */ }
     }
@@ -3184,7 +3482,8 @@
     var NLC = String.fromCharCode(10);
     var wrap = el('div', {
       'data-quizbot-ui': '1',
-      style: 'position:fixed;right:16px;top:16px;width:540px;max-height:82vh;z-index:2147483647;' +
+      style: 'position:fixed;right:16px;top:16px;width:540px;max-width:calc(100vw - 32px);' +
+             'max-height:calc(100vh - 32px);box-sizing:border-box;z-index:2147483647;' +
              'background:#fff;border:2px solid #2f6fed;border-radius:10px;padding:12px;' +
              'font:12px/1.5 "Microsoft YaHei",sans-serif;color:#222;box-shadow:0 8px 30px rgba(0,0,0,.3);' +
              'display:flex;flex-direction:column;'
@@ -3297,8 +3596,12 @@
     // 脚本现在会在所有 frame 里运行（为了支持 iframe 内的对话区）。
     // 无关的 iframe（广告、统计等）不建面板，避免满屏都是按钮。
     if (!shouldShowPanelHere()) return;
+    loadAnswerLog();      // 恢复历史答题记录（跨刷新/重启保留）
     buildPanel();
     log('已加载 v' + VERSION + '（' + (hasGM ? 'Tampermonkey 模式' : '控制台模式') + '）');
+    if (ANSWER_LOG.length) {
+      log('已恢复 ' + ANSWER_LOG.length + ' 条历史答题记录（点「📋 答题记录」查看）');
+    }
     if (!CONFIG.apiKey) log('提示：还没填写 API Key，点「设置」配置你自己的接口');
     if (CONFIG.autoRunOnLoad) setTimeout(function () { doRun(); }, 1200);
 
@@ -3378,6 +3681,8 @@
         useInput: function (el) { CHAT.inputEl = el; saveConfig({ chatInputSelector: cssPathOf(el) }); return el; },
         _state: CHAT
       },
+      answerLog: function () { return ANSWER_LOG.slice(); },
+      clearAnswerLog: clearAnswerLog,
       snapshot: snapshotWithClickCapture,
       snapshotReport: function () { return buildSnapshotReport(); },
       save: saveConfig,
