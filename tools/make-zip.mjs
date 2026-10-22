@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
-const VERSION = '1.9.1';
+const VERSION = '1.11.2';
 const PKG_NAME = 'quiz-bot';
 const OUT = path.join(ROOT, PKG_NAME + '-v' + VERSION + '.zip');
 

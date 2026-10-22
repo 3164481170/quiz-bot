@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI 网页答题助手
 // @namespace    https://local/quizbot
-// @version      1.9.1
+// @version      1.11.2
 // @description  读取网页上的题目 -> 调用你自己配置的 AI API 生成答案 -> 自动填入输入框
 // @author       quiz-bot
 // @match        *://*/*
@@ -34,7 +34,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '1.9.1';
+  var VERSION = '1.11.2';
   var TICK = String.fromCharCode(96);
   var FENCE = TICK + TICK + TICK;
 
@@ -61,7 +61,9 @@
     chatAutoReply: false,
     chatSelfSide: 'auto',
     chatCooldownMs: 1500,
-    watchdogIntervalMs: 5000
+    watchdogIntervalMs: 5000,
+    // ---- 代码模式（Monaco 编辑器 + 关卡任务）----
+    codeAutoRun: false
   };
 
   /* ------------------------------------------------------------ 配置存储 */
@@ -873,6 +875,16 @@
     } }, []);
     btnRegionAuto.textContent = '区域模式：自动应答';
 
+    // ---- 代码模式按钮（Monaco 编辑器 + 关卡任务）----
+    var btnCodeRead = el('button', { style: BTN, onclick: function () { codePreview(); } }, []);
+    btnCodeRead.textContent = '① 读取任务';
+    var btnCodeRun = el('button', { style: BTN + 'background:#2f6fed;color:#fff;border-color:#2f6fed;', onclick: function () { codeDoTask(true); } }, []);
+    btnCodeRun.textContent = '② 生成并填入代码';
+    var btnCodeRunNow = el('button', { style: BTN, onclick: function () { clickRunButton(); } }, []);
+    btnCodeRunNow.textContent = '③ 点启动运行';
+    var btnCodeAuto = el('button', { style: BTN, onclick: function () { if (CODE.watching) codeStopWatch(); else codeStartWatch(); } }, []);
+    btnCodeAuto.textContent = '④ 自动：切关就填';
+
     // 结构快照：把页面结构导出给作者写精准规则
     var btnSnapshot = el('button', {
       style: BTN + 'background:#e8f5e9;border-color:#4caf50;',
@@ -985,6 +997,9 @@
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;' }, [btnRegionAnswer, btnRegionAuto]),
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;' }, [btnSnapshot, btnReset]),
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;' }, [btnLogToggle, btnLogExport]),
+      el('div', { style: 'color:#888;font-size:11px;margin:8px 0 4px;', text: '【代码模式】编程关卡（Monaco 编辑器）用这组' }),
+      el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;' }, [btnCodeRead, btnCodeRun]),
+      el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;' }, [btnCodeRunNow, btnCodeAuto]),
       answerLogWrap,
       el('div', { style: 'color:#888;font-size:11px;margin:8px 0 4px;', text: '【表单模式】答题界面是问卷/试卷时用这组' }),
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;' }, [btnRead, btnRun, btnFill, btnCfg, btnClear]),
@@ -1097,10 +1112,15 @@
     box.appendChild(field('回复延迟（毫秒）', inCool, '检测到新消息后等多久再回复'));
     box.appendChild(field('打开页面自动开启应答', chkChatAuto));
 
+    var chkCodeRun = el('input', { type: 'checkbox' }, []);
+    chkCodeRun.checked = !!CONFIG.codeAutoRun;
+    box.appendChild(field('代码模式：填入后自动点「启动运行」', chkCodeRun, '仅对 Monaco 编辑器的编程关卡生效'));
+
     btnSaveExtra = function () {
       saveConfig({
         chatSelfSide: selSide.value,
-        chatCooldownMs: parseInt(inCool.value, 10) || 1500
+        chatCooldownMs: parseInt(inCool.value, 10) || 1500,
+        codeAutoRun: chkCodeRun.checked
       });
       if (chkChatAuto.checked && !CHAT.watching) setTimeout(chatStartWatch, 300);
       if (!chkChatAuto.checked && CHAT.watching) chatStopWatch();
@@ -2094,8 +2114,8 @@
     '若不需要回复，输出：{"skip": true, "answer": ""}'
   ].join('\n');
 
-  function callModelForChat(messageText) {
-    var user = '对方发来的消息：\n' + messageText + '\n\n请按上述要求给出回复 JSON。';
+  // 统一的一轮对话调用：system + user → 文本。对话模式与代码模式共用。
+  function callModelRaw(systemPrompt, user) {
     if (CONFIG.provider === 'anthropic') {
       return httpPost(CONFIG.baseUrl.replace(/\/+$/, '') + '/messages', {
         'Content-Type': 'application/json',
@@ -2106,7 +2126,7 @@
         model: CONFIG.model,
         max_tokens: Number(CONFIG.maxTokens) || 2048,
         temperature: Number(CONFIG.temperature),
-        system: CHAT_SYSTEM_PROMPT,
+        system: systemPrompt,
         messages: [{ role: 'user', content: user }]
       }).then(function (text) {
         var data = JSON.parse(text);
@@ -2118,7 +2138,7 @@
       'Authorization': 'Bearer ' + CONFIG.apiKey
     }, {
       model: CONFIG.model,
-      messages: [{ role: 'system', content: CHAT_SYSTEM_PROMPT }, { role: 'user', content: user }],
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: user }],
       temperature: Number(CONFIG.temperature),
       max_tokens: Number(CONFIG.maxTokens) || 2048
     }).then(function (text) {
@@ -2129,10 +2149,859 @@
       if (Object.prototype.toString.call(content) === '[object Array]') {
         content = content.map(function (p) { return p.text || ''; }).join('');
       }
-      return String(content || '');
+      var out = String(content || '');
+      if (!out.trim()) {
+        // 常见原因：max_tokens 太小，额度耗在思考上，正文为空
+        var fr = choices[0].finish_reason || (choices[0].message && choices[0].message.finish_reason);
+        throw new Error('模型返回为空' + (fr ? '（finish_reason=' + fr + '）' : '') +
+          '：多半是 max_tokens 太小，请在「设置」里调大后重试');
+      }
+      return out;
     });
   }
 
+  // 对话模式：把对方消息包成 user，沿用统一的 system 提示词
+  function callModelForChat(messageText) {
+    var NL = String.fromCharCode(10);
+    var user = '对方发来的消息：' + NL + messageText + NL + NL + '请按上述要求给出回复 JSON。';
+    return callModelRaw(CHAT_SYSTEM_PROMPT, user);
+  }
+
+  /* ------------------------------------------------------------ 代码模式
+     适用于「Monaco 编辑器 + 关卡任务」的编程练习界面（如 Byte Goose）。
+     这类页面和答题完全不同：
+       · 题目是「任务目标」文字，不是选项
+       · 答案是整段 Java 代码，不是字母
+       · 编辑器是 Monaco 自绘的，textarea 只是输入代理，
+         直接改 textarea.value 不会进入它的模型
+     所以单独做一套：读任务 → 让模型产出完整代码 → 多策略写入并回读校验。 */
+
+  var CODE = {
+    busy: false,
+    watching: false,
+    watchers: [],
+    timer: null,
+    lastTaskHash: "",
+    lastCode: "",
+    lastFillHow: ""
+  };
+
+  function getMonacoGlobal() {
+    try {
+      if (window.monaco && window.monaco.editor) return window.monaco;
+    } catch (e) { /* 某些页面禁止访问 */ }
+    return null;
+  }
+
+  function inTraceArea(node) {
+    var n = node;
+    for (var i = 0; n && i < 10; i++) {
+      var cls = String(n.className || '');
+      if (/(code-trace|trace-line|trace-box|execution-view|step-view)/i.test(cls)) return true;
+      n = n.parentElement;
+    }
+    return false;
+  }
+
+  function findMonacoRoot() {
+    var docs = allDocs();
+    var fallback = null;
+    for (var i = 0; i < docs.length; i++) {
+      var list = [];
+      try { list = docs[i].doc.querySelectorAll(".monaco-editor"); } catch (e) { list = []; }
+      for (var j = 0; j < list.length; j++) {
+        var el = list[j];
+        // 「逐行执行视图」里也可能塞一个 .monaco-editor 做只读镜像，
+        // 它属于回溯面板，不是用户编辑的那个，必须排除。
+        if (inTraceArea(el)) continue;
+        // 真编辑器一定有隐藏 textarea（Monaco 的输入代理），优先认它
+        var hasInput = false;
+        try { hasInput = !!el.querySelector("textarea.inputarea, textarea"); } catch (e) { hasInput = false; }
+        if (hasInput) return el;
+        if (!fallback) fallback = el;
+      }
+    }
+    return fallback;
+  }
+
+  function findCodeTextarea() {
+    var root = findMonacoRoot();
+    if (!root) return null;
+    var ta = null;
+    try { ta = root.querySelector("textarea.inputarea"); } catch (e) { ta = null; }
+    if (!ta) { try { ta = root.querySelector("textarea"); } catch (e) { ta = null; } }
+    return ta;
+  }
+
+  function findRunButton() {
+    var words = ["启动运行", "运行代码", "执行代码", "运行", "执行"];
+    var docs = allDocs();
+    for (var i = 0; i < docs.length; i++) {
+      var btns = [];
+      try { btns = docs[i].doc.querySelectorAll("button,[role=button]"); } catch (e) { btns = []; }
+      for (var j = 0; j < btns.length; j++) {
+        var btn = btns[j];
+        if (isOwnUI(btn)) continue;
+        var t = clean(btn.textContent);
+        if (!t || t.length > 8) continue;
+        for (var k = 0; k < words.length; k++) {
+          if (t === words[k]) return btn;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findBlockByPrefix(prefix, maxLen) {
+    var docs = allDocs();
+    for (var i = 0; i < docs.length; i++) {
+      var nodes = [];
+      try { nodes = docs[i].doc.querySelectorAll("section,div,aside,pre"); } catch (e) { nodes = []; }
+      for (var j = 0; j < nodes.length; j++) {
+        var node = nodes[j];
+        if (isOwnUI(node)) continue;
+        var t = clean(node.textContent);
+        if (!t || t.length > (maxLen || 600)) continue;
+        if (t.indexOf(prefix) === 0) return node;
+      }
+    }
+    return null;
+  }
+
+  function readEditorCode() {
+    var m = getMonacoGlobal();
+    if (m) {
+      var eds = [];
+      try { eds = m.editor.getEditors ? m.editor.getEditors() : []; } catch (e) { eds = []; }
+      for (var i = 0; i < eds.length; i++) {
+        try { return String(eds[i].getValue()); } catch (e) { /* 下一个 */ }
+      }
+      var models = [];
+      try { models = m.editor.getModels ? m.editor.getModels() : []; } catch (e) { models = []; }
+      for (var j = 0; j < models.length; j++) {
+        try { return String(models[j].getValue()); } catch (e) { /* 下一个 */ }
+      }
+    }
+    // 兜底：读 Monaco 自己渲染出来的 .view-line。
+    // 关键是必须限定在 .monaco-editor 内部 —— 页面旁边常有一个「逐行执行视图 /
+    // 代码回溯」面板，里面也是同样的行文本，但它是**上一次运行的结果**，
+    // 不是编辑器真值。拿它做写入校验会得出「明明写进去了却报失败」。
+    // 行数不做限制：单行代码（如 me.setEnergy(4);）本身就是合法内容。
+    var root = findMonacoRoot();
+    if (root) {
+      var lines = [];
+      try { lines = root.querySelectorAll(".view-line"); } catch (e) { lines = []; }
+      // 只认不在回溯面板里的行
+      lines = Array.prototype.slice.call(lines).filter(function (n) { return !inTraceArea(n); });
+      if (lines.length) {
+        var out = [];
+        for (var k = 0; k < lines.length; k++) out.push(clean(lines[k].textContent));
+        return out.join(String.fromCharCode(10));
+      }
+    }
+    return "";
+  }
+
+  function normalizeCode(s) {
+    return String(s === undefined || s === null ? "" : s)
+      .replace(/\r\n/g, String.fromCharCode(10))
+      .replace(/[ \t]+$/gm, "")
+      .trim();
+  }
+
+  function readCodeTask() {
+    var docs = allDocs();
+    var goal = "";
+    var title = "";
+    var apiText = "";
+
+    for (var i = 0; i < docs.length && !goal; i++) {
+      var panel = null;
+      try { panel = docs[i].doc.querySelector(".story-panel"); } catch (e) { panel = null; }
+      if (panel) {
+        goal = clean(panel.textContent)
+          .replace(/^任务目标\s*/, "")
+          .replace(/^💡\s*Tips\s*/i, "")
+          .trim();
+      }
+    }
+    if (!goal) {
+      var node = findBlockByPrefix("任务目标", 500);
+      if (node) {
+        goal = clean(node.textContent)
+          .replace(/^任务目标\s*/, "")
+          .replace(/^💡\s*Tips\s*/i, "")
+          .trim();
+      }
+    }
+    if (!goal) {
+      var cur = findBlockByPrefix("当前任务", 400);
+      if (cur) goal = clean(cur.textContent).replace(/^当前任务\s*/, "").trim();
+    }
+
+    for (var k = 0; k < docs.length && !title; k++) {
+      var active = null;
+      try { active = docs[k].doc.querySelector(".level-item.active"); } catch (e) { active = null; }
+      if (!active) {
+        try { active = docs[k].doc.querySelector(".assignment-item-button.active"); } catch (e2) { active = null; }
+      }
+      if (active) {
+        var copy = null;
+        try { copy = active.querySelector(".assignment-item-copy"); } catch (e3) { copy = null; }
+        title = clean(copy ? copy.textContent : active.textContent);
+      }
+    }
+
+    for (var m = 0; m < docs.length && !apiText; m++) {
+      var apiNode = null;
+      try { apiNode = docs[m].doc.querySelector(".api-panel"); } catch (e) { apiNode = null; }
+      if (apiNode) {
+        apiText = clean(apiNode.textContent).replace(/^可用\s*API\s*/i, "").slice(0, 1200);
+      }
+    }
+    if (!apiText) {
+      var fb = findBlockByPrefix("可用 API", 1200);
+      if (fb) apiText = clean(fb.textContent).replace(/^可用\s*API\s*/i, "").slice(0, 1200);
+    }
+
+    // 「需要修复 / 教学策略」是平台的硬性约束（例如只允许变量、判断、循环、
+    // 数组、集合和教学 API，不许用线程、文件、网络、反射）。不把它给模型，
+    // 模型会写出被判定的代码，白白浪费一轮。
+    var rules = "";
+    var rulePrefixes = ["需要修复", "教学策略", "限制", "规则"];
+    for (var q = 0; q < rulePrefixes.length && !rules; q++) {
+      var rn = findBlockByPrefix(rulePrefixes[q], 800);
+      if (rn) {
+        rules = clean(rn.textContent)
+          .replace(/^需要修复\s*/, "")
+          .replace(/^教学策略[:：]\s*/, "")
+          .slice(0, 800);
+      }
+    }
+
+    // 太短的多半不是任务文本（公告、占位符等），不要拿去请求模型
+    if (goal.length < 6) goal = '';
+
+    return {
+      title: title,
+      goal: goal,
+      api: apiText,
+      rules: rules,
+      code: readEditorCode(),
+      hasEditor: !!findMonacoRoot()
+    };
+  }
+
+  function pressKey(el, key, keyCode, mods) {
+    var w = winOf(el);
+    var opts = {
+      key: key,
+      keyCode: keyCode,
+      which: keyCode,
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: !!(mods && mods.ctrlKey),
+      shiftKey: !!(mods && mods.shiftKey),
+      altKey: !!(mods && mods.altKey)
+    };
+    var types = ["keydown", "keypress", "keyup"];
+    for (var i = 0; i < types.length; i++) {
+      try { el.dispatchEvent(new w.KeyboardEvent(types[i], opts)); } catch (e) { /* 忽略 */ }
+    }
+  }
+
+  function fillViaMonaco(code) {
+    var m = getMonacoGlobal();
+    if (!m) return false;
+    var eds = [];
+    try { eds = m.editor.getEditors ? m.editor.getEditors() : []; } catch (e) { eds = []; }
+    for (var i = 0; i < eds.length; i++) {
+      try { eds[i].setValue(code); return true; } catch (e) { /* 下一个 */ }
+    }
+    var models = [];
+    try { models = m.editor.getModels ? m.editor.getModels() : []; } catch (e) { models = []; }
+    for (var j = 0; j < models.length; j++) {
+      try { models[j].setValue(code); return true; } catch (e) { /* 下一个 */ }
+    }
+    return false;
+  }
+
+  function fillViaSelectAll(code) {
+    var ta = findCodeTextarea();
+    if (!ta) return false;
+    var doc = ta.ownerDocument || document;
+    try { ta.focus(); } catch (e) { /* 忽略 */ }
+    pressKey(ta, "a", 65, { ctrlKey: true });
+    var ok = false;
+    try { ok = doc.execCommand("insertText", false, code); } catch (e) { ok = false; }
+    if (!ok) {
+      try {
+        if (typeof ta.setRangeText === "function") {
+          ta.setRangeText(code, 0, ta.value.length, "end");
+          fireEvents(ta, ["input", "change"]);
+          ok = true;
+        }
+      } catch (e2) { ok = false; }
+    }
+    return ok;
+  }
+
+  function fillViaPaste(code) {
+    var ta = findCodeTextarea();
+    if (!ta) return false;
+    var w = winOf(ta);
+    try { ta.focus(); } catch (e) { /* 忽略 */ }
+    pressKey(ta, "a", 65, { ctrlKey: true });
+    var dt = null;
+    try { dt = new w.DataTransfer(); } catch (e) { dt = null; }
+    if (!dt) return false;
+    try { dt.setData("text/plain", code); } catch (e) { return false; }
+    var ev = null;
+    try {
+      ev = new w.ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt });
+    } catch (e) { ev = null; }
+    if (!ev) return false;
+    try { ta.dispatchEvent(ev); return true; } catch (e) { return false; }
+  }
+
+  function fillViaNative(code) {
+    var ta = findCodeTextarea();
+    if (!ta) return false;
+    try { ta.focus(); } catch (e) { /* 忽略 */ }
+    pressKey(ta, "a", 65, { ctrlKey: true });
+    setNativeValue2(ta, code);
+    fireEvents(ta, ["input", "change"]);
+    return true;
+  }
+
+  function fillEditorCode(code) {
+    var want = normalizeCode(code);
+    var attempts = [
+      { name: "Monaco 接口", fn: fillViaMonaco },
+      { name: "全选替换", fn: fillViaSelectAll },
+      { name: "粘贴事件", fn: fillViaPaste },
+      { name: "原生赋值", fn: fillViaNative }
+    ];
+    var lastGot = "";
+    for (var i = 0; i < attempts.length; i++) {
+      try { attempts[i].fn(code); } catch (e) { /* 换下一种 */ }
+      // 有的平台是异步重绘，同步读会拿到上一帧；所以这里只判"相等"，
+      // 真正的复检交给 verifyFilled() 延迟一拍再做。
+      var got = normalizeCode(readEditorCode());
+      lastGot = got;
+      if (got && got === want) {
+        return { ok: true, how: attempts[i].name, got: got };
+      }
+    }
+    return { ok: false, how: "", got: lastGot };
+  }
+
+  // 写入之后的延迟复检：给 Monaco 一两帧时间重绘，再读一次。
+  // 只要最终读到的与目标一致就算成功（这一步能把"同步读到的旧值"救回来）。
+  function verifyFilled(code, how) {
+    var want = normalizeCode(code);
+    return new Promise(function (resolve) {
+      var tries = 0;
+      function tick() {
+        tries++;
+        var got = normalizeCode(readEditorCode());
+        if (got && got === want) {
+          resolve({ ok: true, how: how, got: got, verifyTries: tries });
+          return;
+        }
+        if (tries >= 6) {
+          resolve({ ok: false, how: how, got: got, verifyTries: tries });
+          return;
+        }
+        setTimeout(tick, 120);
+      }
+      setTimeout(tick, 120);
+    });
+  }
+
+  // 「命令行输出」面板：平台运行/提交的结果都打在这里
+  function readConsoleOutput() {
+    var docs = allDocs();
+    for (var i = 0; i < docs.length; i++) {
+      var nodes = [];
+      try { nodes = docs[i].doc.querySelectorAll(".panel-title, h1, h2, h3, div"); } catch (e) { nodes = []; }
+      for (var j = 0; j < nodes.length; j++) {
+        var t = clean(nodes[j].textContent);
+        if (t.indexOf("命令行输出") !== 0) continue;
+        var box = nodes[j].parentElement;
+        if (!box) continue;
+        return clean(box.textContent).replace(/^命令行输出\s*/, "");
+      }
+    }
+    return "";
+  }
+
+  // 平台的自定义状态码：598 常见于网关限流/超时（nginx limit_req / 上游超时）。
+  // 编程练习2 有提交配额，自由练习没有，所以同一个脚本在自由练习能跑、
+  // 在作业模式里会报 598。
+  var RUN_ERROR_MARK = /(Request failed with status code \d{3}|status code 598|error:|Exception|编译失败|运行失败|超时)/;
+
+  function checkRunResult() {
+    var out = readConsoleOutput();
+    if (!out) return { ok: null, text: "" };
+    if (!RUN_ERROR_MARK.test(out)) return { ok: true, text: out };
+    var m598 = out.match(/status code (\d{3})/);
+    var code = m598 ? m598[1] : "";
+    if (code === "598") {
+      // 实测结论：598 是学校 VPN/WAF（深信服 webproxy）的拦截码，
+      // 触发条件是请求体里出现「函数调用 + 分号」这种代码特征，
+      // 与频率、配额无关 —— 空代码能过，任何真代码都被拦。
+      // 手动点「启动运行」同样 598，所以不是脚本的问题。
+      log("运行被平台的网关防火墙拦截：598 Forbidden", "error");
+      log("这不是代码写错。同一次请求手动点「启动运行」也会 598。", "warn");
+      log("触发原因：网关对请求体里的代码内容做特征拦截（如 me.moveForward();）", "warn");
+      log("能做的：换网络（手机热点）或等网关规则调整；代码已正确填入，可手动复制到平台外运行。", "warn");
+    } else if (code) {
+      log("运行失败：HTTP " + code, "error");
+    } else {
+      log("运行失败：" + out.slice(0, 120), "error");
+    }
+    return { ok: false, text: out, code: code };
+  }
+
+  function clickRunButton() {
+    var btn = findRunButton();
+    if (!btn) { log("没找到「启动运行」按钮", "error"); return false; }
+    log("点击「" + clean(btn.textContent) + "」");
+    try { btn.click(); } catch (e) {
+      log("点击失败：" + e.message, "error");
+      return false;
+    }
+    // 一秒后看结果面板，把 598 这类平台侧错误明确说出来
+    setTimeout(function () {
+      var res = checkRunResult();
+      if (res.ok === true) log("运行结果：" + res.text.slice(0, 80));
+    }, 1200);
+    return true;
+  }
+
+  function codePreview() {
+    var t = readCodeTask();
+    log("—— 代码模式 ——");
+    log("Monaco 编辑器：" + (t.hasEditor ? "已找到" : "未找到（页面可能还没加载完）"));
+    if (t.title) log("关卡：" + t.title);
+    log("任务目标（" + t.goal.length + " 字）：「" + t.goal.replace(/\n/g, " ").slice(0, 100) + "」");
+    if (t.api) log("可用 API：「" + t.api.replace(/\n/g, " ").slice(0, 90) + "」");
+    if (t.rules) log("平台限制：「" + t.rules.replace(/\n/g, " ").slice(0, 90) + "」");
+    if (t.code) {
+      log("编辑器当前代码（" + t.code.length + " 字）：「" + t.code.replace(/\n/g, " / ").slice(0, 100) + "」");
+    } else {
+      log("编辑器当前代码：读不到（可先点一下代码区再试）");
+    }
+    log("「启动运行」按钮：" + (findRunButton() ? "已找到" : "未找到"));
+    setStatus(t.goal ? "任务已读取" : "没找到任务目标", t.goal ? "#0a0" : "#e33");
+    return t;
+  }
+
+  /* ---- 内置答案库 ----
+     由 tools/scrape-levels.mjs 抓取并离线生成，随脚本一起分发。
+     命中就直接插入，不联网、不调模型，切关即填。 */
+  var BUILTIN_ANSWERS = (typeof window !== 'undefined' && window.__QUIZBOT_ANSWERS__) || [
+/* __BUILTIN_START__ */
+  {
+    "index": 1,
+    "title": "点亮训练室",
+    "goal": "代码修复局的训练室刚刚重启。给机器人设置能量，然后让它走到蓝色终端。设置不少于 4 点能量，并让机器人前进 4 格到达终点。",
+    "api": "me.moveForward()\n必须使用: for",
+    "must": "for",
+    "code": "me.setEnergy(4);\nfor (int i = 0; i < 4; i++) {\n    me.moveForward();\n}"
+  },
+  {
+    "index": 2,
+    "title": "变量命名检查",
+    "goal": "训练室要求用有意义的变量名保存移动距离，让代码更容易读懂。使用 moveCount 变量保存移动次数，并让机器人到达终端。",
+    "api": "me.setEnergy(int value)\nme.moveForward()\n必须使用: moveCount",
+    "must": "moveCount",
+    "code": "int moveCount = 4;\nme.setEnergy(moveCount);\nfor (int i = 0; i < moveCount; i++) {\n    me.moveForward();\n}"
+  },
+  {
+    "index": 3,
+    "title": "数据类型闸门",
+    "goal": "控制台返回了状态值。请用 int、boolean 和 String 保存信息，再决定是否启动机器人。使用基本数据类型保存状态，条件满足时移动到终端。",
+    "api": "boolean\nString\nstatus.equals(\"online\")\n必须使用: boolean",
+    "must": "boolean",
+    "code": "int energy = 4;\nboolean ready = true;\nString status = \"online\";\nif (status.equals(\"online\") && ready) {\n    me.setEnergy(energy);\n    for (int i = 0; i < energy; i++) {\n        me.moveForward();\n    }\n}"
+  },
+  {
+    "index": 4,
+    "title": "运算符能量表",
+    "goal": "能源站给出基础能量和补偿能量。请用运算符计算最终移动距离。使用表达式算出 4 步能量，并移动到终端。",
+    "api": "me.setEnergy(int value)\nme.moveForward()\n必须使用: +",
+    "must": "+",
+    "code": "int base = 2;\nint bonus = 3;\nint distance = base + bonus - 1;\nme.setEnergy(distance);\nfor (int i = 0; i < distance; i++) {\n    me.moveForward();\n}"
+  },
+  {
+    "index": 5,
+    "title": "避开仓库墙",
+    "goal": "物流仓库的通道出现障碍。机器人需要在前方有墙时转向，否则继续前进。使用 frontIsWall() 判断墙壁，绕过障碍到达终点。",
+    "api": "me.turnRight()\nme.turnLeft()\nme.moveForward()\n必须使用: if",
+    "must": "if",
+    "code": "for (int i = 0; i < 8; i++) {\n    if (me.frontIsWall()) {\n        me.turnRight();\n    } else {\n        me.moveForward();\n    }\n}"
+  },
+  {
+    "index": 6,
+    "title": "颜色 switch 分拣",
+    "goal": "分拣中心把包裹颜色作为字符串返回。请用 switch 判断颜色并送到对应区域。读取红色包裹，使用 switch 分支，把它送到红色投递点。",
+    "api": "switch (color)\ncase \"red\"\nbreak\n必须使用: switch",
+    "must": "switch",
+    "code": "String color = me.scanColor();\nswitch (color) {\n    case \"red\":\n        me.pick();\n        me.moveForward();\n        me.drop();\n        break;\n    default:\n        break;\n}"
+  },
+  {
+    "index": 7,
+    "title": "循环搬运",
+    "goal": "循环工厂需要机器人把包裹搬到投递点。重复动作比一行一行硬写更可靠。拾取包裹，使用循环移动到投递点，并放下包裹。",
+    "api": "me.drop()\nme.moveForward()\nme.turnLeft()\nme.turnRight()\n必须使用: for",
+    "must": "for",
+    "code": "me.pick();\nfor (int i = 0; i < 4; i++) {\n    me.moveForward();\n}\nme.drop();"
+  },
+  {
+    "index": 8,
+    "title": "直到终端前",
+    "goal": "循环工厂的巡检通道很长，机器人需要一直前进，直到前方出现终端墙。使用 while 和 frontIsWall()，让机器人停在绿色终端格。",
+    "api": "me.moveForward()\n必须使用: while",
+    "must": "while",
+    "code": "while (!me.frontIsWall()) {\n    me.moveForward();\n}"
+  },
+  {
+    "index": 9,
+    "title": "跳过第一次巡检",
+    "goal": "巡检机器人第一轮只做系统自检，不移动；到达终端后如果前方是墙就停止循环。使用 continue 跳过第一次循环，使用 break 在终点前停止。",
+    "api": "break\nme.frontIsWall()\nme.moveForward()\n必须使用: continue",
+    "must": "continue",
+    "code": "for (int i = 0; i < 8; i++) {\n    if (i == 0) {\n        continue;\n    }\n    if (me.frontIsWall()) {\n        break;\n    }\n    me.moveForward();\n}"
+  },
+  {
+    "index": 10,
+    "title": "日志巡检",
+    "goal": "维修小队需要在关键步骤留下日志，方便教师讲解程序执行顺序。使用 me.log(...) 记录开始和结束，并移动到终端。",
+    "api": "字符串拼接 +\nfor 循环\n必须使用: log",
+    "must": "log",
+    "code": "me.log(\"开始巡检\");\nfor (int i = 0; i < 4; i++) {\n    me.log(\"第 \" + (i + 1) + \" 步\");\n    me.moveForward();\n}\nme.log(\"巡检结束\");"
+  },
+  {
+    "index": 11,
+    "title": "颜色分拣",
+    "goal": "物流仓库开始按颜色分拣。机器人需要读取包裹颜色，并把红色包裹送到红色投递点。使用 scanColor() 读取颜色，判断 red 后投递到红色区域。",
+    "api": "color.equals(\"red\")\nme.pick()\nme.drop()\nme.moveForward()\n必须使用: String",
+    "must": "String",
+    "code": "String color = me.scanColor();\nif (color.equals(\"red\")) {\n    me.pick();\n    for (int i = 0; i < 3; i++) {\n        me.moveForward();\n    }\n    me.drop();\n}"
+  },
+  {
+    "index": 12,
+    "title": "数组路线",
+    "goal": "地图终端给出一串路线参数。机器人需要按数组里的步数分段移动和转向。使用 int[] 保存路线，按 2、2 的步数走到终端。",
+    "api": "for (int steps : route)\nme.frontIsWall()\nme.turnRight()\nme.moveForward()\n必须使用: int[]",
+    "must": "int[]",
+    "code": "int[] route = {2, 2};\nfor (int steps : route) {\n    for (int i = 0; i < steps; i++) {\n        me.moveForward();\n    }\n    me.turnRight();\n}"
+  },
+  {
+    "index": 13,
+    "title": "能量预算",
+    "goal": "维修小队的电量有限。请用变量计算需要移动的次数，不要把每一步都写死。用变量保存移动次数，并让机器人刚好到达终端。",
+    "api": "me.setEnergy(int value)\nme.moveForward()\n必须使用: int",
+    "must": "int",
+    "code": "int distance = 4;\nme.setEnergy(distance);\nfor (int i = 0; i < distance; i++) {\n    me.moveForward();\n}"
+  },
+  {
+    "index": 14,
+    "title": "错误保护",
+    "goal": "仓库终端要求机器人移动前先检测前方，否则会撞墙。这个关卡适合课堂讲解运行失败原因。每次移动前先判断墙壁，安全到达终点。",
+    "api": "me.turnRight()\nme.moveForward()\n必须使用: if",
+    "must": "if",
+    "code": "for (int i = 0; i < 8; i++) {\n    if (me.frontIsWall()) {\n        me.turnRight();\n    }\n    me.moveForward();\n}"
+  },
+  {
+    "index": 15,
+    "title": "方法返回值",
+    "goal": "系统提供了一个 EnergyPlan 对象。请调用它的方法获取步数并执行计划。创建 EnergyPlan 对象，调用 steps() 和 apply(...) 完成移动。",
+    "api": "plan.steps()\nplan.apply(me)\n必须使用: steps()",
+    "must": "steps()",
+    "code": "EnergyPlan plan = new EnergyPlan(4);\nint steps = plan.steps();\nplan.apply(me);"
+  },
+  {
+    "index": 16,
+    "title": "封装的能量计划",
+    "goal": "EnergyPlan 内部用 private 保存步数，外部不能直接改字段，只能通过公开方法读取和执行。通过公开方法 steps() 和 apply(me) 使用封装对象。",
+    "api": "public steps()\npublic apply(me)\n必须使用: EnergyPlan",
+    "must": "EnergyPlan",
+    "code": "EnergyPlan plan = new EnergyPlan(4);\nint steps = plan.steps();\nplan.apply(me);"
+  },
+  {
+    "index": 17,
+    "title": "抽象任务步骤",
+    "goal": "MoveStep 继承抽象类 MissionStep，并实现 run(me) 方法。学生先使用这个对象理解抽象类的调用方式。用 MissionStep 类型接收 MoveStep 对象，并执行 run(me)。",
+    "api": "class MoveStep extends MissionStep\nstep.run(me)\n必须使用: MissionStep",
+    "must": "MissionStep",
+    "code": "MissionStep step = new MoveStep(4);\nstep.run(me);"
+  },
+  {
+    "index": 18,
+    "title": "接口命令",
+    "goal": "RobotCommand 是统一命令接口，ForwardCommand 是它的实现类。用接口类型保存实现类对象，并执行 run(me)。",
+    "api": "class ForwardCommand implements RobotCommand\ncommand.run(me)\n必须使用: RobotCommand",
+    "must": "RobotCommand",
+    "code": "RobotCommand command = new ForwardCommand(4);\ncommand.run(me);"
+  },
+  {
+    "index": 19,
+    "title": "多态路线",
+    "goal": "同一个 RobotCommand 数组里可以放不同命令对象，运行时会执行各自的 run(me)。使用接口数组保存前进和转向命令，组合出一条折线路线。",
+    "api": "new ForwardCommand(2)\nnew TurnRightCommand()\n多态 run(me)\n必须使用: RobotCommand[]",
+    "must": "RobotCommand[]",
+    "code": "RobotCommand[] commands = {\n    new ForwardCommand(2),\n    new TurnRightCommand(),\n    new ForwardCommand(2)\n};\nfor (RobotCommand command : commands) {\n    command.run(me);\n}"
+  },
+  {
+    "index": 20,
+    "title": "集合任务队列",
+    "goal": "调度中心把命令放入 List 队列，机器人按顺序执行每个命令。使用 ArrayList 保存 RobotCommand，并依次执行。",
+    "api": "commands.add(...)\n增强 for 循环\n必须使用: ArrayList",
+    "must": "ArrayList",
+    "code": "ArrayList<RobotCommand> commands = new ArrayList<>();\ncommands.add(new ForwardCommand(2));\ncommands.add(new TurnRightCommand());\ncommands.add(new ForwardCommand(2));\nfor (RobotCommand command : commands) {\n    command.run(me);\n}"
+  }
+/* __BUILTIN_END__ */
+  ];
+
+  function normalizeTitle(s) {
+    return String(s || '').replace(/[\s\u00a0]+/g, '').toLowerCase();
+  }
+
+  // 匹配只信「题面」。关卡标题在不同视图下会带 "1-1"、"GAME · v1 · 5 分"
+  // 之类的包装，一旦用模糊匹配就会把不相干的题吃掉，所以标题只做全等兜底。
+  var BUILTIN_GOAL_MIN = 20;   // 题面短于这个长度时不做包含匹配，太容易误中
+
+  function goalOverlap(a, b) {
+    if (!a || !b) return 0;
+    var s = Math.min(a.length, b.length);
+    var l = Math.max(a.length, b.length);
+    if (l === 0) return 0;
+    if (a.indexOf(b) < 0 && b.indexOf(a) < 0) return 0;
+    return s / l;
+  }
+
+  function findBuiltinAnswer(task) {
+    if (!BUILTIN_ANSWERS.length) return null;
+    var wantTitle = normalizeTitle(task.title);
+    var wantGoal = normalizeTitle(task.goal);
+    var i;
+
+    // 1) 题面完全一致（最可靠）
+    if (wantGoal) {
+      for (i = 0; i < BUILTIN_ANSWERS.length; i++) {
+        if (normalizeTitle(BUILTIN_ANSWERS[i].goal) === wantGoal) return BUILTIN_ANSWERS[i];
+      }
+    }
+
+    // 2) 题面高度重叠（页面可能追加提示语）
+    if (wantGoal.length >= BUILTIN_GOAL_MIN) {
+      var best = null, bestScore = 0;
+      for (i = 0; i < BUILTIN_ANSWERS.length; i++) {
+        var score = goalOverlap(wantGoal, normalizeTitle(BUILTIN_ANSWERS[i].goal));
+        if (score >= 0.85 && score > bestScore) { best = BUILTIN_ANSWERS[i]; bestScore = score; }
+      }
+      if (best) return best;
+    }
+
+    // 3) 标题完全一致（去掉 "1-1" 前缀、去掉 "GAME · v1 · 5 分" 后缀后比较）
+    if (wantTitle) {
+      for (i = 0; i < BUILTIN_ANSWERS.length; i++) {
+        if (normalizeTitle(BUILTIN_ANSWERS[i].title) === wantTitle) return BUILTIN_ANSWERS[i];
+      }
+      var core = wantTitle.replace(/^\d+[-.]\d+/, "").replace(/game.*$/, "");
+      if (core.length >= 4) {
+        for (i = 0; i < BUILTIN_ANSWERS.length; i++) {
+          if (normalizeTitle(BUILTIN_ANSWERS[i].title) === core) return BUILTIN_ANSWERS[i];
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function codeDoTask(force) {
+    if (CODE.busy) { log("代码模式正在处理…"); return Promise.resolve(null); }
+    var task = readCodeTask();
+    // 内置答案优先：有就不用联网，也不用等模型
+    var builtin = findBuiltinAnswer(task);
+    if (!task.goal) {
+      log("没找到任务目标：请确认页面停在编程关卡（右侧应有「任务目标」）", "error");
+      setStatus("没找到任务目标", "#e33");
+      return Promise.resolve(null);
+    }
+    if (!task.hasEditor) {
+      log("没找到 Monaco 编辑器：请等页面加载完，或先点一下代码区", "error");
+      setStatus("没找到编辑器", "#e33");
+      return Promise.resolve(null);
+    }
+    var hash = hashText((task.title || "") + "|" + task.goal);
+    if (!force && hash === CODE.lastTaskHash) return Promise.resolve(null);
+
+    if (builtin) {
+      CODE.busy = true;
+      try {
+        var bres = fillEditorCode(builtin.code);
+        if (bres.ok) {
+          CODE.lastTaskHash = hash;
+          CODE.lastCode = builtin.code;
+          CODE.lastFillHow = bres.how + "/内置";
+          log("命中内置答案：" + (builtin.title || task.title || "") + "（" + bres.how + "）");
+          setStatus("已填入内置答案", "#0a0");
+          if (CONFIG.codeAutoRun) setTimeout(clickRunButton, 400);
+          return Promise.resolve({ ok: true, code: builtin.code, how: CODE.lastFillHow, builtin: true });
+        }
+        log("内置答案没能写进编辑器，改用 AI 现写", "warn");
+      } finally {
+        CODE.busy = false;
+      }
+    }
+
+    if (!CONFIG.baseUrl || !CONFIG.model) {
+      log("没命中内置答案，且未配置 API。请在「设置」里填写 Base URL 和模型名", "error");
+      setStatus("无内置答案且未配置 API", "#e33");
+      return Promise.resolve(null);
+    }
+
+    CODE.busy = true;
+    setStatus("请求 AI 写代码…", "#666");
+    log("任务（" + task.goal.length + " 字）：「" + task.goal.replace(/\n/g, " ").slice(0, 90) + "」");
+
+    return callModelForCode(task.goal, task.code, task.api, task.rules).then(function (raw) {
+      var data = parseLooseJson(raw);
+      var code = String(data.code === undefined ? "" : data.code).trim();
+      if (!code) throw new Error("模型没有返回 code 字段");
+      var lineCount = code.split(String.fromCharCode(10)).length;
+      log("AI 代码（" + lineCount + " 行）" + (data.explain ? "：" + data.explain : ""));
+      var res = fillEditorCode(code);
+      var settle = res.ok ? Promise.resolve(res) : verifyFilled(code, res.how);
+      return settle.then(function (fin) {
+        if (fin.ok) {
+          CODE.lastTaskHash = hash;
+          CODE.lastCode = code;
+          CODE.lastFillHow = fin.how || "延迟复检";
+          markHandled(task.goal, { status: "answered", answer: code.slice(0, 120) });
+          log("已写入编辑器（方式：" + CODE.lastFillHow + "）");
+          setStatus("代码已填入", "#0a0");
+          if (CONFIG.codeAutoRun) setTimeout(clickRunButton, 400);
+          return { ok: true, code: code, how: CODE.lastFillHow };
+        }
+        // 确实写不进去：如实报失败，不假装成功
+        log("代码没写进编辑器，读回的是：「" + String(fin.got || "").slice(0, 60) + "」", "error");
+        log("先手动点一下代码区，再点「② 生成并填入代码」重试", "error");
+        setStatus("写入编辑器失败", "#e33");
+        addFailureRecord(task.goal, "写入编辑器失败");
+        return { ok: false, code: code, got: fin.got };
+      });
+    }).catch(function (err) {
+      log("出错: " + err.message, "error");
+      setStatus("出错，详见日志", "#e33");
+      addFailureRecord(task.goal, err.message);
+      return null;
+    }).then(function (v) {
+      CODE.busy = false;
+      return v;
+    });
+  }
+
+  function codeSchedule() {
+    if (!CODE.watching) return;
+    if (CODE.timer) clearTimeout(CODE.timer);
+    CODE.timer = setTimeout(function () {
+      CODE.timer = null;
+      if (!CODE.watching) return;
+      codeDoTask(false);
+    }, 900);
+  }
+
+  function codeStartWatch() {
+    if (CODE.watching) return true;
+    if (!findMonacoRoot()) {
+      log("没找到 Monaco 编辑器，无法开启代码模式自动填充", "error");
+      return false;
+    }
+    var docs = allDocs();
+    var obs = [];
+    for (var i = 0; i < docs.length; i++) {
+      var body = docs[i].doc.body;
+      if (!body) continue;
+      try {
+        var w = docs[i].doc.defaultView || window;
+        var o = new w.MutationObserver(function () { codeSchedule(); });
+        o.observe(body, { childList: true, subtree: true, characterData: true });
+        obs.push(o);
+      } catch (e) { /* 跳过该文档 */ }
+    }
+    if (!obs.length) { log("没能挂上监听（页面结构异常）", "error"); return false; }
+    CODE.watchers = obs;
+    CODE.watching = true;
+    var t0 = readCodeTask();
+    CODE.lastTaskHash = hashText((t0.title || "") + "|" + t0.goal);
+    log("已开启代码模式自动填充：切到新关卡会自动生成代码");
+    setStatus("代码模式自动已开启", "#0a0");
+    return true;
+  }
+
+  function codeStopWatch() {
+    if (CODE.timer) { clearTimeout(CODE.timer); CODE.timer = null; }
+    var list = CODE.watchers || [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i].disconnect(); } catch (e) { /* 忽略 */ }
+    }
+    CODE.watchers = [];
+    if (!CODE.watching) return;
+    CODE.watching = false;
+    log("已停止代码模式自动填充");
+    setStatus("代码模式自动已停止", "#888");
+  }
+  var CODE_SYSTEM_PROMPT = [
+    "你是 Java 编程助手，需要根据关卡任务写出能通过编译与判定的完整代码。",
+    "",
+    "【最重要的一条】",
+    "编辑器里给的骨架含有 /* TODO */ 之类的占位注释，它们只是提示，「不是代码」。",
+    "你必须把它们替换成真实的值或语句。绝对不允许把 /* TODO */ 原样留在提交的代码里，",
+    "那会导致 illegal start of expression 编译错误。",
+    "例如：int moveCount = /* TODO */;  →  int moveCount = 4;",
+    "",
+    "要求：",
+    "1. 输出能直接编译的完整 Java 代码，所有占位符都要落实成具体值。",
+    "2. 只能使用「可用 API」里列出的方法，不要编造不存在的方法名。",
+    "3. 保持骨架的结构与变量名：外层（如 public class Main / main 方法）原样保留，",
+    "   只在骨架里填内容；不要重写类名、方法签名，不要加新的 import。",
+    "4. 代码必须放在 JSON 的 code 字段里，换行写 \\n 转义。",
+    "5. 只输出 JSON，不要输出解释性文字，不要用 Markdown 代码块包裹。",
+    "",
+    "输出格式（严格遵守）：",
+    "{\"code\":\"完整代码\",\"explain\":\"一句话思路\"}"
+  ].join(String.fromCharCode(10));
+
+  function callModelForCode(goal, currentCode, apiText, rules) {
+    var NL = String.fromCharCode(10);
+    var parts = [];
+    parts.push("【关卡任务】");
+    parts.push(goal);
+    if (apiText) { parts.push(""); parts.push("【可用 API】"); parts.push(apiText); }
+    if (rules) { parts.push(""); parts.push("【平台限制（必须遵守，否则判定失败）】"); parts.push(rules); }
+    if (currentCode) {
+      parts.push("");
+      parts.push("【编辑器里的当前代码（骨架，含 /* TODO */ 占位，请补全后整段返回）】");
+      parts.push(currentCode);
+      if (/TODO/.test(currentCode)) {
+        parts.push("");
+        parts.push("注意：上面的 /* TODO */ 必须在结果里换成真实值，不要保留。");
+      }
+    }
+    if (CONFIG.instructions) {
+      parts.push("");
+      parts.push("【额外要求】");
+      parts.push(String(CONFIG.instructions));
+    }
+    parts.push("");
+    parts.push("请输出 JSON。");
+    return callModelRaw(CODE_SYSTEM_PROMPT, parts.join(NL));
+  }
   /* ---------- 按「内容」找最新题目（不依赖 DOM 层级） ----------
      结构驱动的做法（先找"消息列表"那一层，再取最后一条）在真实平台上很不稳：
      消息区可能虚拟滚动、只渲染可视项、或把新旧消息放在不同容器里，
@@ -2297,6 +3166,8 @@
       for (var i = 0; i < all.length && i < 6000; i++) {
         var el = all[i];
         if (isOwnUI(el) || isControlEl(el)) continue;
+        // Monaco 编辑器、逐行执行视图、可用 API 面板里的文本都不是题目
+        if (inCodeArea(el)) continue;
         // 只取「直接含文字」的块，避免父容器把整段会话重复算进来
         var direct = '';
         for (var c = 0; c < el.childNodes.length; c++) {
@@ -2363,6 +3234,46 @@
 
   var FEEDBACK_MARK = /(你的回答是|正确答案[:：]|你的答题结果|本题得分|错因分析|^s*反馈[:：]|回答正确|回答错误|答案解析[:：]|你的得分)/;
 
+  // 编程关卡里的代码骨架、API 列表、执行日志都带这些特征。
+  // 它们很容易被误判成「填空题」（`int moveCount` 这类行会被当成题面），
+  // 结果整段代码被当答案发给模型，还占掉表单模式。这里统一排除。
+  var CODE_SMELL = new RegExp(
+    '(int|double|boolean|String|void|for|while|if|else|return)\\s*\\(' +
+    '|;\\s*($|\\n)' +
+    '|\\{\\s*(//|$)' +
+    '|//\\s*(TODO|设置|前进)' +
+    '|/\\*.*\\*/' +
+    '|me\\.\\w+\\s*\\(' +
+    '|(int|double|boolean)\\s+\\w+\\s*[=;]' +
+    '|error:|cannot find symbol'
+  );
+
+  function looksLikeCode(text) {
+    if (!text) return false;
+    var t = String(text);
+    if (t.length > 600) return true;                 // 超长文本基本不可能是题目
+    // 关键：单个 "int a = 7" 这种出现在正常选择题里的片段不能算代码，
+    // 必须凑齐多个结构性特征（分号/花括号/注释/方法调用）才判为代码。
+    var signals = 0;
+    if (/;\s*(\/\/.*)?$/m.test(t)) signals++;            // 行尾分号
+    if (/\{/.test(t) && /\}/.test(t)) signals++;           // 成对花括号
+    if (/\/\/|\/\*/.test(t)) signals++;                    // 注释
+    if (/\bme\.\w+\s*\(/.test(t)) signals++;              // 关卡 API 调用
+    if (/\b(for|while|if)\s*\(/.test(t) && /[;{}]/.test(t)) signals++;  // 语句块
+    if (/error:/.test(t)) signals += 2;                      // 编译报错
+    return signals >= 2;
+  }
+
+  function inCodeArea(el) {
+    var n = el;
+    for (var i = 0; n && i < 8; i++) {
+      var cls = String(n.className || '');
+      if (/(monaco|code-trace|trace-line|api-panel|editor-panel|code-column|story-panel|result-panel|game-info|editor-value)/i.test(cls)) return true;
+      n = n.parentElement;
+    }
+    return false;
+  }
+
   // 题目通常带有这些标记
   var QUESTION_MARK = new RegExp(
     '(\\u3010(\\u5355\\u9009|\\u591A\\u9009|\\u5224\\u65AD|\\u586B\\u7A7A|\\u7B80\\u7B54|\\u95EE\\u7B54)\\u9898\\u3011' +   // 【单选题】
@@ -2386,6 +3297,8 @@
     if (!text) return false;
     var t = String(text).trim();
     if (t.length < 6) return false;
+    // 代码骨架 / API 列表 / 执行日志不是题目
+    if (looksLikeCode(t)) return false;
     // 含有题型标记或题号 → 是题目
     if (QUESTION_MARK.test(t)) return true;
     // 统计选项行数量：≥2 个（如 A: … B: …）→ 是题目
@@ -2435,6 +3348,11 @@
   var ANSWER_TIMEOUT_MS = 90000;
 
   function chatAnswerLatest(force) {
+    // 编程关卡里没有「聊天题目」，走代码模式。否则会把代码骨架当填空题发出去。
+    if (findMonacoRoot() && readCodeTask().goal) {
+      log('检测到编程关卡，改走代码模式', 'warn');
+      return codeDoTask(force);
+    }
     if (CHAT.busy) {
       var held = Date.now() - (CHAT.busySince || 0);
       if (held < ANSWER_TIMEOUT_MS) {
@@ -3682,6 +4600,17 @@
         _state: CHAT
       },
       answerLog: function () { return ANSWER_LOG.slice(); },
+      code: {
+        task: readCodeTask,
+        editorCode: readEditorCode,
+        fill: fillEditorCode,
+        run: codeDoTask,
+        clickRun: clickRunButton,
+        preview: codePreview,
+        start: codeStartWatch,
+        stop: codeStopWatch,
+        _state: CODE
+      },
       clearAnswerLog: clearAnswerLog,
       snapshot: snapshotWithClickCapture,
       snapshotReport: function () { return buildSnapshotReport(); },

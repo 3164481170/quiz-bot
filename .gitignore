@@ -11,6 +11,8 @@ venv/
 
 # 运行产物
 logs/
+.probe*.mjs
+.dbg.mjs
 *.log
 
 # 本地配置（含 API Key，绝不提交）
